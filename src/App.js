@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useRef } from 'react';
 import * as d3 from 'd3';
 import './index.css';
 import { ChromePicker } from 'react-color';
@@ -58,6 +58,8 @@ function ColorPicker({ color, onChange }) {
 function App() {
   const [data, setData] = useState(null);
   const [geoData, setGeoData] = useState(null);
+  const [geoProperties, setGeoProperties] = useState([]);
+  const [selectedGeoKeyProperty, setSelectedGeoKeyProperty] = useState('');
 
   const [color, setColor] = useState('#ff0000');
   const [sizeColumn, setSizeColumn] = useState('');
@@ -77,16 +79,13 @@ function App() {
   const [fillCountriesWithPoints, setFillCountriesWithPoints] = useState(false);
   const [countryPointFillColor, setCountryPointFillColor] = useState('#00ff00');
 
-  const svgRef = useRef();
+  // **New State Variables**
+  const [borderWidth, setBorderWidth] = useState(1); // Border width slider
+  const [backgroundColor, setBackgroundColor] = useState('#ffffff'); // Background color
+  const [matchBorderColor, setMatchBorderColor] = useState(false); // Checkbox to match border color
+  const [dotSizeMultiplier, setDotSizeMultiplier] = useState(1); // Dot size multiplier
 
-  // Load GeoJSON data (Europe countries)
-  useEffect(() => {
-    d3.json('https://raw.githubusercontent.com/leakyMirror/map-of-europe/master/GeoJSON/europe.geojson')
-      .then(geojson => {
-        setGeoData(geojson);
-      })
-      .catch(err => console.error('Error loading GeoJSON:', err));
-  }, []);
+  const svgRef = useRef();
 
   const drawMap = () => {
     if (!geoData) {
@@ -100,6 +99,10 @@ function App() {
     const width = svgRef.current.clientWidth;
     const height = svgRef.current.clientHeight;
 
+    // Set background color
+    d3.select(svgRef.current.parentNode)
+      .style('background-color', backgroundColor);
+
     const projection = d3.geoAzimuthalEqualArea()
       .rotate([-10, -52])
       .translate([width / 2, height / 2])
@@ -107,14 +110,21 @@ function App() {
 
     const path = d3.geoPath().projection(projection);
 
-    // Draw countries
-    svg.selectAll('path')
+    // Determine the border color
+    const appliedBorderColor = matchBorderColor ? backgroundColor : countryBorderColor;
+
+    // Draw countries with adjusted stroke properties
+    svg.append('g')
+      .selectAll('path')
       .data(geoData.features)
       .enter()
       .append('path')
       .attr('d', path)
-      .attr('stroke', countryBorderColor)
-      .attr('fill', countryFillColor);
+      .attr('fill', countryFillColor)
+      .attr('stroke', appliedBorderColor)
+      .attr('stroke-width', borderWidth)
+      .attr('stroke-opacity', 0.7)
+      //.attr('stroke-dasharray', '1,1'); // Optional
 
     if (plotType === 'point') {
       if (!data) {
@@ -132,16 +142,16 @@ function App() {
       const validData = data.filter(d => !isNaN(d.latitude) && !isNaN(d.longitude));
 
       let sizeScale = null;
-      if (sizeColumn) {
+      if (sizeColumn && sizeColumn !== 'Fixed size') {
         const sizeValues = validData.map(d => +d[sizeColumn]).filter(v => !isNaN(v));
         const minSize = d3.min(sizeValues);
         const maxSize = d3.max(sizeValues);
         if (sizeValues.length === 0 || minSize === maxSize) {
-          sizeScale = () => 10; // Default size if no valid data or all values are the same
+          sizeScale = () => 5 * dotSizeMultiplier; // Default size if no valid data or all values are the same
         } else {
           sizeScale = d3.scaleLinear()
             .domain([minSize, maxSize])
-            .range([5, 20]);
+            .range([5 * dotSizeMultiplier, 20 * dotSizeMultiplier]);
         }
       }
 
@@ -152,7 +162,15 @@ function App() {
         .append('circle')
         .attr('cx', d => projection([d.longitude, d.latitude])[0])
         .attr('cy', d => projection([d.longitude, d.latitude])[1])
-        .attr('r', d => sizeColumn && sizeScale ? sizeScale(+d[sizeColumn]) : 5)
+        .attr('r', d => {
+          if (sizeColumn === 'Fixed size') {
+            return 5 * dotSizeMultiplier;
+          } else if (sizeColumn && sizeScale) {
+            return sizeScale(+d[sizeColumn]);
+          } else {
+            return 5 * dotSizeMultiplier;
+          }
+        })
         .attr('fill', color);
 
       if (fillCountriesWithPoints) {
@@ -162,14 +180,14 @@ function App() {
         validData.forEach(d => {
           geoData.features.forEach(feature => {
             if (d3.geoContains(feature, [d.longitude, d.latitude])) {
-              countriesWithPoints.add(feature.properties.NAME);
+              countriesWithPoints.add(feature.properties[selectedGeoKeyProperty]);
             }
           });
         });
 
         // Update country fill colors
         svg.selectAll('path')
-          .attr('fill', d => countriesWithPoints.has(d.properties.NAME) ? countryPointFillColor : countryFillColor);
+          .attr('fill', d => countriesWithPoints.has(d.properties[selectedGeoKeyProperty]) ? countryPointFillColor : countryFillColor);
       }
 
     } else if (plotType === 'choropleth') {
@@ -183,7 +201,12 @@ function App() {
         return;
       }
 
-      // Create a data map based on a common property (e.g., country code)
+      if (!selectedGeoKeyProperty) {
+        console.error('GeoJSON key property not selected');
+        return;
+      }
+
+      // Create a data map based on the choropleth key column
       const dataMap = {};
       data.forEach(d => {
         const key = d[choroplethKeyColumn];
@@ -201,13 +224,18 @@ function App() {
       const colorScale = d3.scaleSequential(colorInterpolator)
         .domain([minVal, maxVal]);
 
+      // Determine the border color
+      const appliedBorderColor = matchBorderColor ? backgroundColor : countryBorderColor;
+
       // Update country fill colors
       svg.selectAll('path')
         .attr('fill', d => {
-          const countryCode = d.properties.ISO2; // Adjust based on your GeoJSON properties
-          const value = dataMap[countryCode];
+          const featureKey = d.properties[selectedGeoKeyProperty];
+          const value = dataMap[featureKey];
           return value != null ? colorScale(value) : countryFillColor;
-        });
+        })
+        .attr('stroke', appliedBorderColor)
+        .attr('stroke-width', borderWidth);
     }
   };
 
@@ -225,6 +253,31 @@ function App() {
           setChoroplethColumn(cols[1] || cols[0]);
         })
         .catch(err => console.error('Error parsing CSV:', err));
+    }
+  };
+
+  const handleGeoJSONUpload = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        try {
+          const geojson = JSON.parse(event.target.result);
+          setGeoData(geojson);
+
+          // Extract properties from the first feature
+          if (geojson.features && geojson.features.length > 0) {
+            const properties = Object.keys(geojson.features[0].properties);
+            setGeoProperties(properties);
+            setSelectedGeoKeyProperty(properties[0]); // Default to the first property
+          } else {
+            console.error('GeoJSON features are empty');
+          }
+        } catch (err) {
+          console.error('Error parsing GeoJSON:', err);
+        }
+      };
+      reader.readAsText(file);
     }
   };
 
@@ -267,6 +320,33 @@ function App() {
           </select>
         </div>
 
+        {/* GeoJSON File Upload */}
+        <div className="mb-4">
+          <label className="mr-2 font-bold">Upload GeoJSON File:</label>
+          <input
+            type="file"
+            accept=".geojson,.json"
+            onChange={handleGeoJSONUpload}
+          />
+        </div>
+
+        {geoData && (
+          <div className="mb-4">
+            <label className="mr-2">Select GeoJSON Key Property:</label>
+            <select
+              value={selectedGeoKeyProperty}
+              onChange={e => setSelectedGeoKeyProperty(e.target.value)}
+            >
+              {geoProperties.map(prop => (
+                <option key={prop} value={prop}>{prop}</option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {/* Data File Upload */}
+        <label className="mr-2 font-bold">Upload Data File:</label>
+
         <input
           type="file"
           accept=".csv"
@@ -293,10 +373,37 @@ function App() {
                 <div className="mb-4">
                   <label className="mr-2">Size Based On:</label>
                   <select value={sizeColumn} onChange={e => setSizeColumn(e.target.value)}>
-                    <option value="">Select Column</option>
+                    {/* **Updated Dropdown**: "Fixed size" as the first option */}
+                    <option value="Fixed size">Fixed size</option>
                     {columns.map(col => <option key={col} value={col}>{col}</option>)}
                   </select>
                 </div>
+                {/* **New Dot Size Slider** */}
+                <div className="mb-4">
+                  <label className="mr-2">Dot Size Multiplier:</label>
+                  <input
+                    type="range"
+                    min="0.5"
+                    max="5"
+                    step="0.1"
+                    value={dotSizeMultiplier}
+                    onChange={e => setDotSizeMultiplier(Number(e.target.value))}
+                  />
+                  <span className="ml-2">{dotSizeMultiplier.toFixed(1)}x</span>
+                </div>
+                <div className="mb-4">
+                  <label className="mr-2">Border Width:</label>
+                  <input
+                    type="range"
+                    min="0.0"
+                    max="4"
+                    step="0.1"
+                    value={borderWidth}
+                    onChange={e => setBorderWidth(Number(e.target.value))}
+                  />
+                  <span className="ml-2">{borderWidth.toFixed(1)}</span>
+                </div>
+
                 <div className="mb-4">
                   <label className="mr-2">Select Dot Color:</label>
                   <ColorPicker color={color} onChange={(c) => setColor(c.hex)} />
@@ -343,6 +450,22 @@ function App() {
               </>
             )}
 
+            {/* **New Background Color Picker** */}
+            <div className="mb-4">
+              <label className="mr-2">Page/Image Background Color:</label>
+              <ColorPicker color={backgroundColor} onChange={(c) => setBackgroundColor(c.hex)} />
+            </div>
+
+            {/* **New Checkbox to Match Border Color with Background Color** */}
+            <div className="mb-4">
+              <label className="mr-2">Match Border Color with Background:</label>
+              <input
+                type="checkbox"
+                checked={matchBorderColor}
+                onChange={e => setMatchBorderColor(e.target.checked)}
+              />
+            </div>
+
             {/* Common Controls */}
             <div className="mb-4">
               <label className="mr-2">Country Background Color:</label>
@@ -350,7 +473,16 @@ function App() {
             </div>
             <div className="mb-4">
               <label className="mr-2">Country Border Color:</label>
-              <ColorPicker color={countryBorderColor} onChange={(c) => setCountryBorderColor(c.hex)} />
+              {/* **Conditionally Disable Border Color Picker** */}
+              <ColorPicker
+                color={matchBorderColor ? backgroundColor : countryBorderColor}
+                onChange={(c) => setCountryBorderColor(c.hex)}
+                // Disable the color picker if matchBorderColor is true
+                // Optionally, you can hide it or make it read-only
+                // Here, we'll disable the interaction
+                // Adding a title to indicate it's disabled
+              />
+              {matchBorderColor && <span className="ml-2 text-gray-500">(Matched with background)</span>}
             </div>
 
             <button
